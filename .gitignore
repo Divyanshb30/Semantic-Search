@@ -13,3 +13,5 @@ npm-debug.log*
 
 # ChromaDB (embedded database storage)
 chroma.sqlite3
+scripts/
+transformed-student-data.json
