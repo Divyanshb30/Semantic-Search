@@ -5,16 +5,24 @@ import axios from "axios";
 import fs from "fs/promises";
 import { pipeline } from "@xenova/transformers";
 
-// Helper function to make metadata ChromaDB compatible
+// Helper function to safely make metadata ChromaDB compatible
 function formatMetadata(metadata) {
   const formatted = {};
 
   for (const [key, value] of Object.entries(metadata)) {
     if (value === null || value === undefined) {
       formatted[key] = "N/A";
+    } else if (Array.isArray(value)) {
+      // Convert array items to strings safely
+      formatted[key] = value.map((item) =>
+        item === null || item === undefined
+          ? "N/A"
+          : String(item).substring(0, 500)
+      );
     } else if (typeof value === "string") {
       formatted[key] = value.substring(0, 500);
     } else {
+      // For safety, convert any other type to string
       formatted[key] = String(value);
     }
   }
@@ -22,11 +30,27 @@ function formatMetadata(metadata) {
   return formatted;
 }
 
+// Metadata validator to detect problematic fields before ingestion
+function validateMetadata(metadata) {
+  for (const [key, value] of Object.entries(metadata)) {
+    if (
+      typeof value !== "string" &&
+      !(Array.isArray(value) && value.every((v) => typeof v === "string"))
+    ) {
+      return {
+        valid: false,
+        key,
+        value,
+      };
+    }
+  }
+  return { valid: true };
+}
+
 async function generateEmbeddings(documents) {
   console.log("🧠 Generating embeddings with local model...");
 
   try {
-    // Load the embedding model
     const extractor = await pipeline(
       "feature-extraction",
       "Xenova/all-MiniLM-L6-v2"
@@ -34,7 +58,6 @@ async function generateEmbeddings(documents) {
 
     const embeddings = [];
 
-    // Generate embeddings for each document
     for (let i = 0; i < documents.length; i++) {
       console.log(`📊 Generating embedding ${i + 1}/${documents.length}...`);
 
@@ -43,7 +66,6 @@ async function generateEmbeddings(documents) {
         normalize: true,
       });
 
-      // Convert the tensor to a regular array
       embeddings.push(Array.from(output.data));
     }
 
@@ -110,11 +132,23 @@ async function ingestToChroma() {
     );
     console.log(`✅ Loaded ${data.documents.length} student documents`);
 
-    // 2. Generate embeddings for all documents
+    // 2. Validate metadata for first few documents to catch errors early
+    for (let i = 0; i < Math.min(10, data.documents.length); i++) {
+      const validation = validateMetadata(data.documents[i].metadata);
+      if (!validation.valid) {
+        console.error(
+          `❌ Metadata validation failed on document index ${i}, key: ${validation.key}`
+        );
+        console.error(`Value:`, validation.value);
+        throw new Error("Metadata validation failed. Fix metadata format.");
+      }
+    }
+
+    // 3. Generate embeddings for all documents
     const documents = data.documents.map((doc) => doc.content);
     const embeddings = await generateEmbeddings(documents);
 
-    // 3. Get or create collection
+    // 4. Get or create collection
     const collectionId = await getOrCreateCollection(
       baseURL,
       tenant,
@@ -122,29 +156,28 @@ async function ingestToChroma() {
       collectionName
     );
 
-    // 4. Prepare complete payload with embeddings
-    console.log("🛠️  Preparing final payload...");
+    // 5. Prepare complete payload with embeddings in batches (e.g. 50)
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < data.documents.length; i += BATCH_SIZE) {
+      const batchDocs = data.documents.slice(i, i + BATCH_SIZE);
+      const batchEmbeds = embeddings.slice(i, i + BATCH_SIZE);
 
-    const payload = {
-      ids: data.documents.map((doc) => doc.id),
-      documents: data.documents.map((doc) => doc.content),
-      metadatas: data.documents.map((doc) => formatMetadata(doc.metadata)),
-      embeddings: embeddings, // Now we have the required embeddings!
-    };
+      const payload = {
+        ids: batchDocs.map((doc) => doc.id),
+        documents: batchDocs.map((doc) => doc.content),
+        metadatas: batchDocs.map((doc) => formatMetadata(doc.metadata)),
+        embeddings: batchEmbeds,
+      };
 
-    console.log("📊 Embeddings shape:", {
-      count: embeddings.length,
-      dimensions: embeddings[0] ? embeddings[0].length : 0,
-    });
+      console.log(`📤 Uploading batch ${Math.floor(i / BATCH_SIZE) + 1}...`);
 
-    // 5. Ingest data
-    console.log("📤 Uploading documents to ChromaDB...");
-    const addResponse = await axios.post(
-      `${baseURL}/api/v2/tenants/${tenant}/databases/${database}/collections/${collectionId}/add`,
-      payload
-    );
+      await axios.post(
+        `${baseURL}/api/v2/tenants/${tenant}/databases/${database}/collections/${collectionId}/add`,
+        payload
+      );
+    }
 
-    console.log("✅ Documents added successfully! Status:", addResponse.status);
+    console.log("✅ Documents added successfully!");
     console.log("🎉 SUCCESS: All documents ingested into ChromaDB!");
     console.log(`📊 Total students: ${data.documents.length}`);
     console.log("🔍 You can now perform semantic search on student data!");
@@ -161,6 +194,6 @@ async function ingestToChroma() {
 }
 
 // Run the ingestion
-ingestToChroma().catch((error) => {
+ingestToChroma().catch(() => {
   process.exit(1);
 });
