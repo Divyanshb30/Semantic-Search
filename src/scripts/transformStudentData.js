@@ -21,11 +21,9 @@ function safeString(val) {
 function formatEducation(prevEdus, higherEdus) {
   const prev = prevEdus.map(
     (e) =>
-      `${safeString(e.course)} in ${safeString(
-        e.specialization
-      )} from ${safeString(e.institution)} (${safeString(
-        e.percent_obtained
-      )}%, ${safeString(e.passout_year)})`
+      `${safeString(e.specialization)} from ${safeString(
+        e.institution
+      )} (${safeString(e.passout_year)})`
   );
   const higher = higherEdus.map(
     (e) => `${safeString(e.exam_name)} at ${safeString(e.institute_name)}`
